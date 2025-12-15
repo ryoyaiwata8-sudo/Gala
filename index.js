@@ -1,174 +1,248 @@
-console.log("=== Running index.js from:", import.meta.url);
 // ===============================
-// 1. 必要な読み込み
+// 0. 初期設定
 // ===============================
-import "dotenv/config";   // .env 読み込み
+import "dotenv/config";
 import express from "express";
-import { google } from "googleapis";  // ← New!! Sheets用
+import { google } from "googleapis";
 
 const app = express();
 app.use(express.json());
 
 
 // ===============================
-// 2. フェイクAI分類関数（課金不要で開発を進めるため）
+// 1. メッセージ分類
 // ===============================
-async function classifyMessage(text) {
+async function classifyMessage(text = "") {
+    const t = String(text).toLowerCase();
 
-    if (text.includes("VIP") || text.includes("vip") || text.includes("シャンパン")) {
+    if (
+        t.includes("営業時間") ||
+        t.includes("何時から") ||
+        t.includes("場所") ||
+        t.includes("どこ") ||
+        t.includes("アクセス")
+    ) {
+        return `
+category: 店舗情報
+alert: NO
+auto_reply: YES
+`;
+    }
+
+    if (t.includes("vip") || t.includes("シャンパン")) {
         return `
 category: VIP
 alert: YES
 auto_reply: NO
-    `;
+`;
     }
 
-    if (text.includes("落とし物") || text.includes("忘れ物")) {
+    if (t.includes("落とし物") || t.includes("忘れ物")) {
         return `
 category: 落とし物
 alert: NO
 auto_reply: YES
-    `;
+`;
     }
 
-    if (text.includes("求人") || text.includes("バイト") || text.includes("仕事")) {
+    if (t.includes("求人") || t.includes("バイト") || t.includes("仕事")) {
         return `
 category: 求人
 alert: NO
 auto_reply: YES
-    `;
+`;
     }
 
     return `
 category: その他
 alert: NO
 auto_reply: YES
-    `;
+`;
 }
 
 
 // ===============================
-// 3. Google Sheets 書き込み関数（ここが新規追加）
+// 2. 分類結果パース
 // ===============================
-async function appendToSheet(parsed, message, sender = "Unknown") {
-    try {
-        console.log("=== Sheets書き込み開始 ===");
-
-        const auth = new google.auth.JWT(
-            process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-            null,
-            process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-            ["https://www.googleapis.com/auth/spreadsheets"]
-        );
-
-        const sheets = google.sheets({ version: "v4", auth });
-
-        const row = [
-            "",                          // ID（シートが自動）
-            "Instagram",                 // Source
-            sender,                      // Sender
-            message,                     // Message
-            new Date().toISOString(),    // DateTime
-            parsed.language || "",       // Language
-            parsed.category || "",       // Category
-            parsed.auto_reply || "",     // AutoReply
-            parsed.auto_reply === "YES" ? "自動返信済" : "要対応", // Status
-            parsed.alert || "",          // Alert
-            ""                           // Notes
-        ];
-
-        console.log("追加行：", row);
-
-        await sheets.spreadsheets.values.append({
-            spreadsheetId: process.env.SPREADSHEET_ID,
-            range: "Main Log!A:K",
-            valueInputOption: "USER_ENTERED",
-            requestBody: { values: [row] }
-        });
-
-        console.log("=== Sheets書き込み成功 ===");
-
-    } catch (err) {
-        console.error("=== Sheets書き込みエラー ===");
-        console.error(err);
-    }
-}
-
-
-// ===============================
-// 4. Webhook（Instagram未接続でもOK）
-// ===============================
-app.post("/webhook", async (req, res) => {
-    const message = req.body.message;
-
-    console.log("=== 受信したメッセージ ===");
-    console.log(message);
-    console.log("===========================");
-
-    const raw = await classifyMessage(message);
-
-    // フェイクAI分類をオブジェクト化する（追加）
+function parseAIResult(raw = "") {
     const parsed = {};
     raw.split("\n").forEach(line => {
         const [key, value] = line.split(":").map(v => v && v.trim());
         if (key && value) parsed[key] = value;
     });
-
-    console.log("=== AI分類結果 ===");
-    console.log(parsed);
-    console.log("=======================");
-
-    // ⭐ 新規追加：Google Sheets へ書き込み
-    await appendToSheet(parsed, message);
-
-    res.sendStatus(200);
-});
+    return parsed;
+}
 
 
 // ===============================
+// 3. 自動返信文生成
 // ===============================
-// 5. 動作確認用（GET）
-// ===============================
-app.get("/", (req, res) => {
-    res.send("Webhook server is running!");
-});
+function getAutoReplyMessage(parsed) {
+    if (parsed.category === "店舗情報") {
+        return `お問い合わせありがとうございます！
 
-// ★ 追加：テストエンドポイント（ここを必ず / と listen の間に入れる！）
-app.get("/test", async (req, res) => {
+【基本営業時間】
+22:00 〜 翌05:00
+
+【場所】
+https://maps.app.goo.gl/oVTnjvmxomGJi98S7
+
+────────────────
+▼公式サイト
+https://osaka.gala-resort.jp/
+
+▼公式Instagram
+https://www.instagram.com/gala.resort/
+────────────────
+
+ご不明点があればお気軽にご連絡ください！`;
+    }
+    return null;
+}
+
+
+// ===============================
+// 4. 通知（今は console / 将来 Slack）
+// ===============================
+function notifyStaff(text) {
     try {
-        const message = "VIP席空いてますか？";
+        console.log("=== NOTIFY STAFF ===");
+        console.log(text);
+        console.log("====================");
+    } catch (e) {
+        console.error("notifyStaff error:", e);
+    }
+}
 
-        console.log("=== /test エンドポイント 呼び出し ===");
-        console.log("テストメッセージ:", message);
 
+// ===============================
+// 5. Google Sheets ログ
+// ===============================
+async function appendToSheet(parsed, message, sender) {
+    const auth = new google.auth.GoogleAuth({
+        credentials: {
+            client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+            private_key: (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
+        },
+        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+
+    const client = await auth.getClient();
+    const sheets = google.sheets({ version: "v4", auth: client });
+
+    const autoReply = parsed.auto_reply || "";
+    const category = parsed.category || "";
+    const alert = parsed.alert || "";
+
+    const status = autoReply === "YES" ? "自動返信済" : "要対応";
+    const replyType = autoReply === "YES" ? category : "";
+
+    const row = [
+        "",
+        "Instagram",
+        sender,
+        message,
+        new Date(), // ← ★ここを変更（JSTで表示される）
+        "JA",
+        category,
+        autoReply,
+        status,
+        alert,
+        "",
+        replyType,
+    ];
+
+    await sheets.spreadsheets.values.append({
+        spreadsheetId: process.env.SPREADSHEET_ID,
+        range: "Main Log!A:L",
+        valueInputOption: "USER_ENTERED",
+        requestBody: { values: [row] },
+    });
+}
+
+
+
+// ===============================
+// 6. Webhook（司令塔）
+// ===============================
+app.post("/webhook", async (req, res) => {
+    const message = req.body?.message || "";
+    const sender = req.body?.sender || "Unknown";
+
+    console.log("=== /webhook ===", { sender, message });
+
+    try {
+        // ① 分類
         const raw = await classifyMessage(message);
+        const parsed = parseAIResult(raw);
 
-        // フェイクAI結果をオブジェクト化
-        const parsed = {};
-        raw.split("\n").forEach(line => {
-            const [key, value] = line.split(":").map(v => v && v.trim());
-            if (key && value) parsed[key] = value;
-        });
+        console.log("parsed:", parsed);
 
-        console.log("=== AI分類結果 ===");
-        console.log(parsed);
+        // ② VIP通知（Sheetsより先・必ず実行）
+        if (parsed.category === "VIP") {
+            notifyStaff(`【VIP／予約DM】
+内容：${message}
+対応：スタッフ対応必要`);
+        }
 
-        await appendToSheet(parsed, message, "TEST_USER");
+        // ③ Sheets（失敗してもWebhookは落とさない）
+        try {
+            await appendToSheet(parsed, message, sender);
+        } catch (sheetErr) {
+            console.error("Sheets error (continue):", sheetErr);
+        }
 
-        console.log("=== /test: Sheets書き込み完了 ===");
-        res.send("OK! シートに書き込みました。");
+        // ④ 自動返信（今はログのみ）
+        const autoReplyMessage = getAutoReplyMessage(parsed);
+        console.log("autoReply:", autoReplyMessage ? "あり" : "なし");
+
+        res.sendStatus(200);
     } catch (err) {
-        console.error("=== /test エラー ===");
-        console.error(err);
-        res.status(500).send("ERROR");
+        console.error("=== webhook fatal error ===", err);
+        res.sendStatus(500);
     }
 });
 
+
 // ===============================
-// 6. サーバー起動
+// 7. 動作確認
+// ===============================
+app.get("/", (_, res) => {
+    res.send("Webhook server is running!");
+});
+
+
+// ===============================
+// 8. 起動
 // ===============================
 app.listen(3000, () => {
     console.log("Server running on http://localhost:3000");
 });
 
 
+// ===============================
+// 9. テスト用ルート
+// ===============================
+app.get("/test", async (_, res) => {
+    const message = "VIP席空いてますか？";
+    const sender = "TEST_USER";
+
+    const raw = await classifyMessage(message);
+    const parsed = parseAIResult(raw);
+
+    console.log("TEST parsed:", parsed);
+
+    if (parsed.category === "VIP") {
+        notifyStaff(`【VIP／予約DM】
+内容：${message}
+対応：スタッフ対応必要`);
+    }
+
+    try {
+        await appendToSheet(parsed, message, sender);
+    } catch (e) {
+        console.error("TEST Sheets error:", e);
+    }
+
+    res.send("OK /test 完了");
+});
